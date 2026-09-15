@@ -5,8 +5,10 @@ import com.example.model.TabloChannel
 import com.example.model.TabloDevice
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -96,68 +98,75 @@ class TabloChannelService(
         if (device.localUrl.isNotEmpty()) {
             try {
                 val path = "/guide/channels"
-                val (authHeader, dateHeader) = TabloHmac.makeDeviceAuth("GET", path)
-                val localReq = Request.Builder()
+                val localReqBuilder = Request.Builder()
                     .url(device.localUrl.trimEnd('/') + path)
                     .addHeader("User-Agent", LOCAL_UA)
-                    .addHeader("Authorization", authHeader)
-                    .addHeader("Date", dateHeader)
                     .get()
-                    .build()
 
-                val localResp = client.newCall(localReq).execute()
+                // Optional HMAC auth for 4th Gen local devices if available
+                try {
+                    val (authHeader, dateHeader) = TabloHmac.makeDeviceAuth("GET", path)
+                    localReqBuilder.addHeader("Authorization", authHeader)
+                    localReqBuilder.addHeader("Date", dateHeader)
+                } catch (_: Exception) {}
+
+                val localResp = client.newCall(localReqBuilder.build()).execute()
                 if (localResp.isSuccessful) {
                     val pathsArray = JSONArray(localResp.body?.string() ?: "[]")
-                    for (i in 0 until minOf(pathsArray.length(), 60)) {
-                        val chPath = pathsArray.getString(i)
-                        try {
-                            val (chAuth, chDate) = TabloHmac.makeDeviceAuth("GET", chPath)
-                            val chReq = Request.Builder()
-                                .url(device.localUrl.trimEnd('/') + chPath)
-                                .addHeader("User-Agent", LOCAL_UA)
-                                .addHeader("Authorization", chAuth)
-                                .addHeader("Date", chDate)
-                                .get()
-                                .build()
-                            val chResp = client.newCall(chReq).execute()
-                            if (chResp.isSuccessful) {
-                                val chObj = JSONObject(chResp.body?.string() ?: "{}")
-                                val cInfo = chObj.optJSONObject("channel") ?: chObj
-                                val ident = cInfo.optString("channel_identifier", cInfo.optString("identifier", chPath))
-                                val callSign = cInfo.optString("call_sign", "OTA")
-                                val major = cInfo.optInt("major", 0)
-                                val minor = cInfo.optInt("minor", 0)
-                                val network = cInfo.optString("network", "")
+                    val pathsToFetch = mutableListOf<String>()
+                    for (i in 0 until minOf(pathsArray.length(), 100)) {
+                        pathsToFetch.add(pathsArray.getString(i))
+                    }
 
-                                var logoUrl: String? = null
-                                val logos = cInfo.optJSONArray("logos")
-                                if (logos != null && logos.length() > 0) {
-                                    for (l in 0 until logos.length()) {
-                                        val lg = logos.getJSONObject(l)
-                                        val u = lg.optString("url")
-                                        if (u.isNotEmpty()) {
-                                            logoUrl = u
-                                            break
+                    if (pathsToFetch.isNotEmpty()) {
+                        // Attempt POST /batch first (documented high-performance batch retrieval)
+                        var batchSucceeded = false
+                        try {
+                            val batchArray = JSONArray(pathsToFetch)
+                            val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+                            val batchReq = Request.Builder()
+                                .url(device.localUrl.trimEnd('/') + "/batch")
+                                .addHeader("User-Agent", LOCAL_UA)
+                                .post(batchArray.toString().toRequestBody(jsonMediaType))
+                                .build()
+
+                            val batchResp = client.newCall(batchReq).execute()
+                            if (batchResp.isSuccessful) {
+                                val batchJson = JSONObject(batchResp.body?.string() ?: "{}")
+                                for (chPath in pathsToFetch) {
+                                    val chObj = batchJson.optJSONObject(chPath) ?: continue
+                                    parseChannelFromObject(chObj, chPath)?.let { parsed ->
+                                        if (channels.none { it.identifier == parsed.identifier }) {
+                                            channels.add(parsed)
                                         }
                                     }
                                 }
-
-                                if (channels.none { it.identifier == ident }) {
-                                    channels.add(
-                                        TabloChannel(
-                                            identifier = ident,
-                                            callSign = callSign,
-                                            major = major,
-                                            minor = minor,
-                                            network = network,
-                                            kind = "ota",
-                                            logoUrl = logoUrl
-                                        )
-                                    )
-                                }
+                                batchSucceeded = channels.isNotEmpty()
                             }
                         } catch (e: Exception) {
-                            // ignore single channel failure
+                            Log.d(TAG, "Batch channel retrieval failed, falling back to sequential: ${e.message}")
+                        }
+
+                        // Fallback: fetch individual channels if batch failed
+                        if (!batchSucceeded) {
+                            for (chPath in pathsToFetch) {
+                                try {
+                                    val chReq = Request.Builder()
+                                        .url(device.localUrl.trimEnd('/') + chPath)
+                                        .addHeader("User-Agent", LOCAL_UA)
+                                        .get()
+                                        .build()
+                                    val chResp = client.newCall(chReq).execute()
+                                    if (chResp.isSuccessful) {
+                                        val chObj = JSONObject(chResp.body?.string() ?: "{}")
+                                        parseChannelFromObject(chObj, chPath)?.let { parsed ->
+                                            if (channels.none { it.identifier == parsed.identifier }) {
+                                                channels.add(parsed)
+                                            }
+                                        }
+                                    }
+                                } catch (_: Exception) {}
+                            }
                         }
                     }
                 }
@@ -171,6 +180,38 @@ class TabloChannelService(
         } else {
             channels.sorted()
         }
+    }
+
+    private fun parseChannelFromObject(chObj: JSONObject, fallbackIdentifier: String): TabloChannel? {
+        val cInfo = chObj.optJSONObject("channel") ?: chObj
+        val ident = cInfo.optString("channel_identifier", cInfo.optString("identifier", fallbackIdentifier))
+        val callSign = cInfo.optString("call_sign", cInfo.optString("display_name", "OTA"))
+        val major = cInfo.optInt("major", 0)
+        val minor = cInfo.optInt("minor", 0)
+        val network = cInfo.optString("network", "")
+
+        var logoUrl: String? = null
+        val logos = cInfo.optJSONArray("logos")
+        if (logos != null && logos.length() > 0) {
+            for (l in 0 until logos.length()) {
+                val lg = logos.getJSONObject(l)
+                val u = lg.optString("url")
+                if (u.isNotEmpty()) {
+                    logoUrl = u
+                    break
+                }
+            }
+        }
+
+        return TabloChannel(
+            identifier = ident,
+            callSign = callSign,
+            major = major,
+            minor = minor,
+            network = network,
+            kind = "ota",
+            logoUrl = logoUrl
+        )
     }
 
     fun getFallbackChannels(): List<TabloChannel> {

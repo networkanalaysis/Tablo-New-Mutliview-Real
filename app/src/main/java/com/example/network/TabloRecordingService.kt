@@ -5,8 +5,10 @@ import com.example.model.TabloDevice
 import com.example.model.TabloRecording
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -26,59 +28,68 @@ class TabloRecordingService(
         if (device != null && device.localUrl.isNotEmpty()) {
             try {
                 val path = "/recordings/airings"
-                val (auth, date) = TabloHmac.makeDeviceAuth("GET", path)
-                val req = Request.Builder()
+                val reqBuilder = Request.Builder()
                     .url(device.localUrl.trimEnd('/') + path)
                     .addHeader("User-Agent", LOCAL_UA)
-                    .addHeader("Authorization", auth)
-                    .addHeader("Date", date)
                     .get()
-                    .build()
 
-                val resp = client.newCall(req).execute()
+                try {
+                    val (auth, date) = TabloHmac.makeDeviceAuth("GET", path)
+                    reqBuilder.addHeader("Authorization", auth)
+                    reqBuilder.addHeader("Date", date)
+                } catch (_: Exception) {}
+
+                val resp = client.newCall(reqBuilder.build()).execute()
                 if (resp.isSuccessful) {
                     val rawJson = resp.body?.string() ?: "[]"
                     val pathsArray = JSONArray(rawJson)
                     val recordings = mutableListOf<TabloRecording>()
+                    val pathsToFetch = mutableListOf<String>()
 
-                    for (i in 0 until minOf(pathsArray.length(), 40)) {
-                        val recPath = pathsArray.getString(i)
+                    for (i in 0 until minOf(pathsArray.length(), 50)) {
+                        pathsToFetch.add(pathsArray.getString(i))
+                    }
+
+                    if (pathsToFetch.isNotEmpty()) {
+                        // Try POST /batch
+                        var batchSucceeded = false
                         try {
-                            val (recAuth, recDate) = TabloHmac.makeDeviceAuth("GET", recPath)
-                            val recReq = Request.Builder()
-                                .url(device.localUrl.trimEnd('/') + recPath)
+                            val batchArray = JSONArray(pathsToFetch)
+                            val jsonMediaType = "application/json; charset=utf-8".toMediaType()
+                            val batchReq = Request.Builder()
+                                .url(device.localUrl.trimEnd('/') + "/batch")
                                 .addHeader("User-Agent", LOCAL_UA)
-                                .addHeader("Authorization", recAuth)
-                                .addHeader("Date", recDate)
-                                .get()
+                                .post(batchArray.toString().toRequestBody(jsonMediaType))
                                 .build()
-                            val recResp = client.newCall(recReq).execute()
-                            if (recResp.isSuccessful) {
-                                val obj = JSONObject(recResp.body?.string() ?: "{}")
-                                val ad = obj.optJSONObject("airing_details") ?: JSONObject()
-                                val title = ad.optString("show_title", "Tablo Recording")
-                                val ep = obj.optJSONObject("episode")
-                                val series = obj.optJSONObject("series")
-                                val desc = ep?.optString("description")
-                                    ?: series?.optString("description")
-                                    ?: ad.optString("description", "")
-                                val start = ad.optString("datetime", "")
-                                val duration = ad.optLong("duration", 0)
-                                val objId = obj.optString("object_id", recPath)
 
-                                recordings.add(
-                                    TabloRecording(
-                                        identifier = objId,
-                                        path = recPath,
-                                        title = title,
-                                        description = desc,
-                                        startIso = start,
-                                        durationSec = duration
-                                    )
-                                )
+                            val batchResp = client.newCall(batchReq).execute()
+                            if (batchResp.isSuccessful) {
+                                val batchJson = JSONObject(batchResp.body?.string() ?: "{}")
+                                for (recPath in pathsToFetch) {
+                                    val obj = batchJson.optJSONObject(recPath) ?: continue
+                                    parseRecordingFromObject(obj, recPath)?.let { recordings.add(it) }
+                                }
+                                batchSucceeded = recordings.isNotEmpty()
                             }
                         } catch (e: Exception) {
-                            Log.w(TAG, "Error fetching recording detail $recPath: ${e.message}")
+                            Log.d(TAG, "Batch recording retrieval failed: ${e.message}")
+                        }
+
+                        if (!batchSucceeded) {
+                            for (recPath in pathsToFetch) {
+                                try {
+                                    val recReq = Request.Builder()
+                                        .url(device.localUrl.trimEnd('/') + recPath)
+                                        .addHeader("User-Agent", LOCAL_UA)
+                                        .get()
+                                        .build()
+                                    val recResp = client.newCall(recReq).execute()
+                                    if (recResp.isSuccessful) {
+                                        val obj = JSONObject(recResp.body?.string() ?: "{}")
+                                        parseRecordingFromObject(obj, recPath)?.let { recordings.add(it) }
+                                    }
+                                } catch (_: Exception) {}
+                            }
                         }
                     }
 
@@ -92,6 +103,28 @@ class TabloRecordingService(
         }
 
         getFallbackRecordings()
+    }
+
+    private fun parseRecordingFromObject(obj: JSONObject, fallbackPath: String): TabloRecording? {
+        val ad = obj.optJSONObject("airing_details") ?: JSONObject()
+        val title = ad.optString("show_title", obj.optString("title", "Tablo Recording"))
+        val ep = obj.optJSONObject("episode")
+        val series = obj.optJSONObject("series")
+        val desc = ep?.optString("description")
+            ?: series?.optString("description")
+            ?: ad.optString("description", "")
+        val start = ad.optString("datetime", "")
+        val duration = ad.optLong("duration", 0)
+        val objId = obj.optString("object_id", fallbackPath)
+
+        return TabloRecording(
+            identifier = objId,
+            path = fallbackPath,
+            title = title,
+            description = desc,
+            startIso = start,
+            durationSec = duration
+        )
     }
 
     fun getFallbackRecordings(): List<TabloRecording> {

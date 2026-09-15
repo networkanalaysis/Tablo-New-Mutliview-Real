@@ -45,21 +45,24 @@ class TabloStreamService(
                     }
                 }.toString()
 
-                val (auth, date) = TabloHmac.makeDeviceAuth("POST", path, body)
-                val req = Request.Builder()
-                    .url("${device.localUrl.trimEnd('/')}$path?lh")
+                val reqBuilder = Request.Builder()
+                    .url("${device.localUrl.trimEnd('/')}$path")
                     .addHeader("User-Agent", LOCAL_UA)
-                    .addHeader("Authorization", auth)
-                    .addHeader("Date", date)
                     .post(body.toRequestBody(JSON_TYPE))
-                    .build()
 
-                val resp = client.newCall(req).execute()
+                try {
+                    val (auth, date) = TabloHmac.makeDeviceAuth("POST", path, body)
+                    reqBuilder.addHeader("Authorization", auth)
+                    reqBuilder.addHeader("Date", date)
+                } catch (_: Exception) {}
+
+                val resp = client.newCall(reqBuilder.build()).execute()
                 if (resp.isSuccessful) {
                     val rawJson = resp.body?.string() ?: "{}"
                     val obj = JSONObject(rawJson)
                     val playlistUrl = obj.optString("playlist_url")
                     if (playlistUrl.isNotEmpty()) {
+                        Log.d(TAG, "Stream started successfully for ${channel.callSign} -> $playlistUrl")
                         return@withContext TabloStream(
                             channelIdentifier = channel.identifier,
                             playlistUrl = playlistUrl,
@@ -68,6 +71,9 @@ class TabloStreamService(
                             keepalive = obj.optInt("keepalive", 60)
                         )
                     }
+                } else {
+                    val errBody = resp.body?.string() ?: ""
+                    Log.w(TAG, "Stream request returned HTTP ${resp.code} for ${channel.callSign}: $errBody")
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Failed starting Tablo live stream for ${channel.callSign}: ${e.message}")
@@ -93,16 +99,18 @@ class TabloStreamService(
                     }
                 }.toString()
 
-                val (auth, date) = TabloHmac.makeDeviceAuth("POST", path, body)
-                val req = Request.Builder()
-                    .url("${device.localUrl.trimEnd('/')}$path?lh")
+                val reqBuilder = Request.Builder()
+                    .url("${device.localUrl.trimEnd('/')}$path")
                     .addHeader("User-Agent", LOCAL_UA)
-                    .addHeader("Authorization", auth)
-                    .addHeader("Date", date)
                     .post(body.toRequestBody(JSON_TYPE))
-                    .build()
 
-                val resp = client.newCall(req).execute()
+                try {
+                    val (auth, date) = TabloHmac.makeDeviceAuth("POST", path, body)
+                    reqBuilder.addHeader("Authorization", auth)
+                    reqBuilder.addHeader("Date", date)
+                } catch (_: Exception) {}
+
+                val resp = client.newCall(reqBuilder.build()).execute()
                 if (resp.isSuccessful) {
                     val rawJson = resp.body?.string() ?: "{}"
                     val obj = JSONObject(rawJson)

@@ -44,6 +44,18 @@ class MultiviewPlaybackManager(context: Context) {
         slots[slotIndex].load(channel, stream, muted = !isAudible)
     }
 
+    fun getLoadedChannels(): List<TabloChannel> {
+        return slots.mapNotNull { it.channel.value }
+    }
+
+    fun getActiveOtaChannelCount(): Int {
+        return slots.mapNotNull { it.channel.value }.filter { it.major > 0 }.distinctBy { it.identifier }.size
+    }
+
+    fun findExistingSlotForChannel(channelIdentifier: String): PlayerSlot? {
+        return slots.firstOrNull { it.channel.value?.identifier == channelIdentifier }
+    }
+
     fun clearSlot(slotIndex: Int) {
         if (slotIndex in 0..3) {
             slots[slotIndex].clear()

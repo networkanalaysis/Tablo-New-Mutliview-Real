@@ -57,6 +57,11 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import kotlinx.coroutines.launch
 
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.Search
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+
 @Composable
 fun SettingsScreen(
     repository: TabloRepository,
@@ -66,6 +71,9 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val scope = rememberCoroutineScope()
+    val serverInfo by repository.serverInfo.collectAsStateWithLifecycle()
+    val tuners by repository.tuners.collectAsStateWithLifecycle()
+    val discoveredDevices by repository.discoveredDevices.collectAsStateWithLifecycle()
 
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
@@ -89,7 +97,7 @@ fun SettingsScreen(
                 color = TextPrimary
             )
             Text(
-                text = "Connect directly to your Tablo 4th Gen hardware or cloud account.",
+                text = "Connect directly to your Tablo hardware on your local network or configure cloud options.",
                 fontSize = 13.sp,
                 color = TextSecondary,
                 modifier = Modifier.padding(top = 4.dp)
@@ -126,7 +134,7 @@ fun SettingsScreen(
                                     color = TextPrimary
                                 )
                                 Text(
-                                    text = if (activeDevice != null) "SID: ${activeDevice.sid} • ${activeDevice.localUrl}" else "Preloaded with broadcast OTA test streams",
+                                    text = if (activeDevice != null) "SID: ${activeDevice.sid} • ${activeDevice.localUrl}" else "Ready to scan for Tablo on local network",
                                     fontSize = 12.sp,
                                     color = TextSecondary
                                 )
@@ -164,7 +172,191 @@ fun SettingsScreen(
             }
         }
 
-        // Section 2: Tablo Cloud Account Login
+        // Section 2: Automatic Network Discovery (Documented Tablo Discovery API)
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+                border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Search, contentDescription = null, tint = ActiveAudioPill)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = "Auto-Discover Tablo (No Login Required)",
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = "Scans via Tablo Assocserver & LAN UDP broadcast (Port 8881/8882)",
+                                    fontSize = 12.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+
+                        Button(
+                            onClick = {
+                                isActionRunning = true
+                                actionMessage = "Scanning local network..."
+                                scope.launch {
+                                    try {
+                                        val devs = repository.scanLocalNetwork()
+                                        if (devs.isNotEmpty()) {
+                                            actionMessage = "Discovered ${devs.size} Tablo unit(s)"
+                                        } else {
+                                            actionMessage = "No Tablo found. Try Direct IP below."
+                                        }
+                                    } catch (e: Exception) {
+                                        actionMessage = "Scan error: ${e.message}"
+                                    } finally {
+                                        isActionRunning = false
+                                    }
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ActiveAudioPill),
+                            shape = RoundedCornerShape(8.dp),
+                            enabled = !isActionRunning
+                        ) {
+                            if (isActionRunning) {
+                                CircularProgressIndicator(strokeWidth = 2.dp, color = Color.White, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                            }
+                            Text("Scan Network", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+
+                    if (discoveredDevices.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "Discovered Tablo Devices:",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextPrimary
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        discoveredDevices.forEach { dev ->
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = SurfaceRaised,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column {
+                                        Text(text = dev.name, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                                        Text(
+                                            text = "${dev.localUrl} • Tuners: ${dev.tunerCount} ${if (dev.version.isNotEmpty()) "• v${dev.version}" else ""}",
+                                            fontSize = 11.sp,
+                                            color = TextSecondary
+                                        )
+                                    }
+                                    Button(
+                                        onClick = {
+                                            repository.saveDevice(dev)
+                                            repository.refreshAll()
+                                        },
+                                        colors = ButtonDefaults.buttonColors(containerColor = AccentGreen),
+                                        shape = RoundedCornerShape(6.dp)
+                                    ) {
+                                        Text("Connect", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Section 3: Hardware Details & Tuner Allocation
+        if (activeDevice != null) {
+            item {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = SurfaceDark),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SurfaceBorder),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(20.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Memory, contentDescription = null, tint = AccentGreen)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "Tablo Tuner Architecture & Hardware Status",
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        val detectedTuners = serverInfo?.tunerCount ?: activeDevice.tunerCount
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = SurfaceRaised,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Text("Physical Tuners", fontSize = 11.sp, color = TextSecondary)
+                                    Text("$detectedTuners Tuners", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = SurfaceRaised,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Text("Device Model", fontSize = 11.sp, color = TextSecondary)
+                                    Text(serverInfo?.model?.ifEmpty { "4th Gen" } ?: "4th Gen", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = SurfaceRaised,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Text("Firmware Version", fontSize = 11.sp, color = TextSecondary)
+                                    Text(serverInfo?.version?.ifEmpty { "Latest" } ?: "Latest", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "Tuner Allocation Notes: In 4-channel multiview, each simultaneous live OTA broadcast stream occupies 1 physical Tablo tuner. OTT/FAST cloud channels and duplicate channels share resources, allowing all 4 slots to run smoothly.",
+                            fontSize = 11.sp,
+                            color = TextSecondary,
+                            lineHeight = 16.sp
+                        )
+                    }
+                }
+            }
+        }
+
+        // Section 4: Tablo Cloud Account Login
         item {
             Card(
                 shape = RoundedCornerShape(16.dp),

@@ -9,7 +9,40 @@ data class TabloDevice(
     val localUrl: String,
     val lighthouseToken: String = "",
     val accountToken: String = "",
-    val clientId: String = ""
+    val clientId: String = "",
+    val tunerCount: Int = 2,
+    val version: String = "",
+    val board: String = ""
+) {
+    val hostOrIp: String
+        get() = localUrl.removePrefix("http://").removePrefix("https://").substringBefore(':')
+}
+
+data class TabloServerInfo(
+    val serverId: String,
+    val name: String,
+    val version: String = "",
+    val localAddress: String = "",
+    val model: String = "",
+    val tunerCount: Int = 2,
+    val timezone: String = "",
+    val availability: String = ""
+)
+
+data class TabloTuner(
+    val index: Int,
+    val inUse: Boolean,
+    val channelPath: String? = null,
+    val recordingPath: String? = null
+)
+
+data class TabloDiscoveredCpe(
+    val serverId: String,
+    val name: String,
+    val privateIp: String,
+    val httpPort: Int = 8885,
+    val serverVersion: String = "",
+    val board: String = ""
 )
 
 data class TabloChannel(

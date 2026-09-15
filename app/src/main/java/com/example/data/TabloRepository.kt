@@ -7,7 +7,9 @@ import com.example.model.TabloChannel
 import com.example.model.TabloDevice
 import com.example.model.TabloProgram
 import com.example.model.TabloRecording
+import com.example.model.TabloServerInfo
 import com.example.model.TabloStream
+import com.example.model.TabloTuner
 import com.example.network.TabloAuthService
 import com.example.network.TabloChannelService
 import com.example.network.TabloDiscoveryService
@@ -49,6 +51,15 @@ class TabloRepository(
 
     private val _activeDevice = MutableStateFlow<TabloDevice?>(null)
     val activeDevice: StateFlow<TabloDevice?> = _activeDevice.asStateFlow()
+
+    private val _serverInfo = MutableStateFlow<TabloServerInfo?>(null)
+    val serverInfo: StateFlow<TabloServerInfo?> = _serverInfo.asStateFlow()
+
+    private val _tuners = MutableStateFlow<List<TabloTuner>>(emptyList())
+    val tuners: StateFlow<List<TabloTuner>> = _tuners.asStateFlow()
+
+    private val _discoveredDevices = MutableStateFlow<List<TabloDevice>>(emptyList())
+    val discoveredDevices: StateFlow<List<TabloDevice>> = _discoveredDevices.asStateFlow()
 
     private val _channels = MutableStateFlow<List<TabloChannel>>(emptyList())
     val channels: StateFlow<List<TabloChannel>> = _channels.asStateFlow()
@@ -118,6 +129,19 @@ class TabloRepository(
         repoScope.launch {
             _isLoading.value = true
             try {
+                val dev = _activeDevice.value
+                if (dev != null && dev.localUrl.isNotEmpty()) {
+                    // Fetch /server/info and /server/tuners
+                    try {
+                        val sInfo = discoveryService.fetchServerInfo(dev.localUrl)
+                        _serverInfo.value = sInfo
+                        val tunerList = discoveryService.fetchTuners(dev.localUrl)
+                        _tuners.value = tunerList
+                    } catch (e: Exception) {
+                        Log.d(TAG, "Server info / tuners fetch warning: ${e.message}")
+                    }
+                }
+
                 // Fetch channels
                 val chList = channelService.getChannels(_activeDevice.value)
                 // Enrich current programs for channels
@@ -131,8 +155,11 @@ class TabloRepository(
                 val recList = recordingService.getRecordings(_activeDevice.value)
                 _recordings.value = recList
 
+                val tunersCount = _serverInfo.value?.tunerCount ?: _activeDevice.value?.tunerCount ?: 2
+                val busyTuners = _tuners.value.count { it.inUse }
+
                 _statusMessage.value = if (_activeDevice.value != null) {
-                    "Connected to ${_activeDevice.value?.name} (${_channels.value.size} channels)"
+                    "Connected to ${_activeDevice.value?.name} (${_channels.value.size} channels, $tunersCount tuners ($busyTuners in use))"
                 } else {
                     "Ready (${_channels.value.size} broadcast channels)"
                 }
@@ -143,6 +170,33 @@ class TabloRepository(
                 _isLoading.value = false
             }
         }
+    }
+
+    suspend fun scanLocalNetwork(): List<TabloDevice> {
+        _isLoading.value = true
+        _statusMessage.value = "Discovering Tablo devices on local network..."
+        return try {
+            val found = discoveryService.discoverAllDevices()
+            _discoveredDevices.value = found
+            if (found.isNotEmpty()) {
+                _statusMessage.value = "Found ${found.size} Tablo device(s)"
+            } else {
+                _statusMessage.value = "No Tablo devices found via automatic discovery."
+            }
+            found
+        } catch (e: Exception) {
+            _statusMessage.value = "Discovery error: ${e.message}"
+            emptyList()
+        } finally {
+            _isLoading.value = false
+        }
+    }
+
+    suspend fun refreshTuners(): List<TabloTuner> {
+        val dev = _activeDevice.value ?: return emptyList()
+        val list = discoveryService.fetchTuners(dev.localUrl)
+        _tuners.value = list
+        return list
     }
 
     suspend fun login(email: String, pass: String): List<TabloDevice> {
